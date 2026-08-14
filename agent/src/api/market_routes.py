@@ -9,12 +9,20 @@ in :mod:`src.api.live_routes`.
 Routes (auth via the caller-supplied ``require_auth`` dependency):
 
 - ``GET /market/screener`` — full-market movers/turnover ranking (Eastmoney)
-- ``GET /market/options``  — one expiration's enriched option chain (Yahoo)
+- ``GET /market/options``  — one expiration's enriched option chain
 
 Both reuse the throttled provider clients the agent tools already use
-(``backtest.loaders.eastmoney_client`` / ``yahoo_client``), so dashboard polling
-shares the same per-host rate limiting as tool calls and cannot get the process
-IP-banned by opening a second, unthrottled path to the provider.
+(``backtest.loaders.eastmoney_client`` / ``yahoo_client`` / ``cboe_client``), so
+dashboard polling shares the same per-host rate limiting as tool calls and
+cannot get the process IP-banned by opening a second, unthrottled path to the
+provider.
+
+Chain sourcing: Yahoo is tried first, and Cboe's keyless delayed-quote CDN
+answers when Yahoo fails or has nothing — its ``v7/finance/options`` endpoint is
+unofficial and goes through spells of 401s and IP throttling, which without a
+fallback takes the whole options view down with it. Both are free and need no
+account. The provider that actually answered is reported as ``source`` on every
+response, so a degraded read is visible rather than silent.
 
 Freshness: every response carries ``as_of`` (server UTC at fetch) and
 ``source``. Responses are cached in-process for :data:`_CACHE_TTL_SECONDS` so a
@@ -52,6 +60,12 @@ _cache_lock = threading.Lock()
 _VALID_MARKETS = ("a", "us", "hk")
 _VALID_SORTS = ("change_pct", "volume", "amount", "turnover")
 _MAX_TOP_N = 100
+
+# Chain providers in fallback order, and the selectors a caller may force.
+# "auto" walks the list; naming one pins the read to that provider, which is
+# how you check whether a source is healthy without waiting for it to fail.
+_CHAIN_PROVIDERS = ("yahoo", "cboe")
+_VALID_CHAIN_PROVIDERS = ("auto",) + _CHAIN_PROVIDERS
 
 # US option underlyings: letters, digits and the separators Yahoo accepts
 # (BRK-B, RDS.A). Bounded so a hostile query string cannot become a long path
@@ -206,43 +220,53 @@ def register_market_routes(app: FastAPI, require_auth: AuthDep | None = None) ->
         ticker: str = Query(..., min_length=1, max_length=16),
         expiration: int | None = Query(None, ge=0),
         risk_free_rate: float = Query(0.04, ge=_MIN_RATE, le=_MAX_RATE),
+        provider: str = Query("auto"),
     ) -> dict[str, Any]:
         """Fetch one expiration of a US option chain, enriched for trading.
 
         Args:
             ticker: US underlying symbol (a trailing ``.US`` is accepted and
-                mapped by the Yahoo client).
+                mapped by each provider's own symbol convention).
             expiration: Epoch-second expiration from the ``expirations`` list.
                 Omit for the nearest expiry.
             risk_free_rate: Annual continuously-compounded rate used for greeks
                 and the implied-vol fallback.
+            provider: ``auto`` (Yahoo, then Cboe), or a provider name to pin the
+                read to one source.
 
         Returns:
             The :func:`src.market_discovery.shape_option_chain` payload plus
-            ``source``.
+            ``source`` (the provider that answered) and ``attempted`` (every
+            provider tried, in order, so a fallback is visible to the client).
 
         Raises:
-            HTTPException: 400 on a malformed ticker, 404 when the symbol has no
-                listed options, 502 when the provider request fails.
+            HTTPException: 400 on a malformed ticker or unknown provider, 404
+                when no provider lists options for the symbol, 502 when every
+                provider request failed.
         """
         symbol = ticker.strip().upper()
         if not _TICKER_RE.match(symbol):
             raise HTTPException(status_code=400, detail="ticker is not a valid symbol")
+        if provider not in _VALID_CHAIN_PROVIDERS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"provider must be one of {list(_VALID_CHAIN_PROVIDERS)}",
+            )
 
-        key = f"options:{symbol}:{expiration}:{risk_free_rate}"
+        key = f"options:{symbol}:{expiration}:{risk_free_rate}:{provider}"
         if (hit := _cached(key)) is not None:
             return hit
 
-        from backtest.loaders import yahoo_client
+        order = _CHAIN_PROVIDERS if provider == "auto" else (provider,)
+        result, source, attempted, failures = await _fetch_chain(
+            symbol, expiration=expiration, order=order
+        )
 
-        try:
-            result = await _to_thread(
-                yahoo_client.get_options, symbol, expiration=expiration
-            )
-        except Exception as exc:  # noqa: BLE001 — mapped to a 502 below
-            raise _upstream_error("options chain", exc) from exc
-
-        if not result:
+        if result is None:
+            if failures:
+                # Every provider errored: report the first failure, since that
+                # is the one the user would otherwise have been served by.
+                raise _upstream_error("options chain", failures[0])
             raise HTTPException(
                 status_code=404, detail=f"no listed options found for {symbol}"
             )
@@ -250,9 +274,54 @@ def register_market_routes(app: FastAPI, require_auth: AuthDep | None = None) ->
         payload = shape_option_chain(
             result, ticker=symbol, risk_free_rate=risk_free_rate, now=_now()
         )
-        payload["source"] = "yahoo"
+        payload["source"] = source
+        payload["attempted"] = attempted
         _store(key, payload)
         return payload
+
+
+async def _fetch_chain(
+    symbol: str,
+    *,
+    expiration: int | None,
+    order: tuple[str, ...],
+) -> tuple[dict[str, Any] | None, str | None, list[str], list[Exception]]:
+    """Try each chain provider in turn, returning the first usable answer.
+
+    A provider is skipped over on either an exception or an empty chain — a
+    symbol Yahoo has stopped serving looks like the latter, and falling through
+    is exactly as useful as falling through a raised error.
+
+    Args:
+        symbol: Upper-cased underlying symbol.
+        expiration: Requested expiration in epoch seconds, or ``None``.
+        order: Provider names to try, in priority order.
+
+    Returns:
+        ``(result, source, attempted, failures)``. ``result``/``source`` are
+        ``None`` when nothing answered; ``attempted`` lists every provider tried
+        and ``failures`` the exceptions they raised, so the caller can tell "all
+        broken" (502) from "genuinely no options listed" (404).
+    """
+    from backtest.loaders import cboe_client, yahoo_client
+
+    clients = {"yahoo": yahoo_client.get_options, "cboe": cboe_client.get_options}
+    attempted: list[str] = []
+    failures: list[Exception] = []
+
+    for name in order:
+        attempted.append(name)
+        try:
+            result = await _to_thread(clients[name], symbol, expiration=expiration)
+        except Exception as exc:  # noqa: BLE001 — try the next provider
+            logger.warning("%s option chain failed for %s: %s", name, symbol, exc)
+            failures.append(exc)
+            continue
+        if result:
+            return result, name, attempted, failures
+        logger.info("%s listed no options for %s", name, symbol)
+
+    return None, None, attempted, failures
 
 
 async def _to_thread(func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:

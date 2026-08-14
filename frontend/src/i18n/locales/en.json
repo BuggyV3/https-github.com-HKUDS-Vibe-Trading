@@ -773,10 +773,13 @@
     "ivImpliedHint": "The provider quoted no IV; this one is inverted from the mid price",
     "emptyChainFilters": "No contracts match these filters",
     "chainFootnote": "Showing {{shown}} of {{total}} contracts. Greeks priced at a {{rate}}% risk-free rate.",
+    "dataVia": "Chain data via {{source}}",
+    "fallbackNote": "{{failed}} was unavailable, so the backup feed answered.",
     "methodologyTitle": "How these scores are built",
     "methodologyFlow": "Flow score blends three percentiles computed across the rows currently on screen: turnover value (40%), turnover rate (30%) and absolute move (30%). It is relative to this view, not to the whole market — asking for 100 rows instead of 20 changes it.",
     "methodologyLiquidity": "Liquidity score blends quoted spread as a share of mid (50%), open interest (30%) and session volume (20%), the last two on a log scale. It measures how easily a contract trades, not whether it is worth owning.",
     "methodologyGreeks": "Mid, spread, moneyness and break-even are arithmetic on the quoted bid/ask. Greeks come from Black-Scholes on the contract's implied volatility; where the provider quotes no IV it is inverted from the mid price and marked with an asterisk.",
+    "methodologyProviders": "Chains come from Yahoo Finance, falling back to Cboe's delayed-quote feed when Yahoo is down. Both are free and keyless, and both are delayed — the timestamp above says when the data was fetched, not when the exchange printed it.",
     "methodologyMissing": "A dash means the provider had no value. Nothing is estimated or filled in, and one-sided quotes are left unpriced rather than averaged into a mid nobody will trade at.",
     "methodologyDisclaimer": "These are ranking aids over public market data — not forecasts, recommendations or investment advice.",
     "sources": "Sources: screener via {{screener}}, options via {{options}}."

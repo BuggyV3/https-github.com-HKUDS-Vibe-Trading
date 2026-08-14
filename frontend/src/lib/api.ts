@@ -200,7 +200,10 @@ export interface OptionChainResponse {
   days_to_expiry: number | null;
   risk_free_rate: number;
   as_of: string;
+  /** The chain provider that actually answered. */
   source: string;
+  /** Every provider tried, in order — longer than one means a fallback ran. */
+  attempted?: string[];
   calls: OptionContract[];
   puts: OptionContract[];
   summary: OptionChainSummary;

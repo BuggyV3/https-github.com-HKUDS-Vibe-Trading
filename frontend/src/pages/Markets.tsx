@@ -304,6 +304,7 @@ export function Markets() {
           <p>{t("markets.methodologyFlow")}</p>
           <p>{t("markets.methodologyLiquidity")}</p>
           <p>{t("markets.methodologyGreeks")}</p>
+          <p>{t("markets.methodologyProviders")}</p>
           <p>{t("markets.methodologyMissing")}</p>
           <p className="font-medium text-foreground">{t("markets.methodologyDisclaimer")}</p>
           <p>

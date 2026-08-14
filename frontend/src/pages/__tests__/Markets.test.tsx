@@ -67,6 +67,7 @@ function chain(overrides: Partial<OptionChainResponse> = {}): OptionChainRespons
     risk_free_rate: 0.04,
     as_of: new Date().toISOString(),
     source: "yahoo",
+    attempted: ["yahoo"],
     calls: [
       {
         contract_symbol: "AAPL_C150",
@@ -272,6 +273,27 @@ describe("Markets dashboard", () => {
     expect(
       await screen.findByText(/Option chains cover US-listed underlyings only/),
     ).toBeInTheDocument();
+  });
+
+  it("names the provider that served the chain", async () => {
+    render(<Markets />);
+    fireEvent.click(await screen.findByText("AAPL"));
+    await screen.findByTestId("iv-smile");
+
+    expect(screen.getByText("Chain data via yahoo")).toBeInTheDocument();
+    expect(screen.queryByText(/was unavailable/)).not.toBeInTheDocument();
+  });
+
+  it("flags when the backup chain provider had to answer", async () => {
+    apiMock.getOptionChain.mockResolvedValue(
+      chain({ source: "cboe", attempted: ["yahoo", "cboe"] }),
+    );
+    render(<Markets />);
+    fireEvent.click(await screen.findByText("AAPL"));
+    await screen.findByTestId("iv-smile");
+
+    expect(screen.getByText("Chain data via cboe")).toBeInTheDocument();
+    expect(screen.getByText(/yahoo was unavailable/)).toBeInTheDocument();
   });
 
   it("discloses how the scores are built", async () => {

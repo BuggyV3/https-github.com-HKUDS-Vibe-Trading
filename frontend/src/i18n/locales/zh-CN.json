@@ -768,10 +768,13 @@
     "ivImpliedHint": "数据源未提供隐含波动率，此值由中间价反解得出",
     "emptyChainFilters": "没有符合筛选条件的合约",
     "chainFootnote": "显示 {{total}} 份合约中的 {{shown}} 份。希腊字母按 {{rate}}% 无风险利率计算。",
+    "dataVia": "期权数据来自 {{source}}",
+    "fallbackNote": "{{failed}} 暂不可用，已由备用数据源提供。",
     "methodologyTitle": "评分是如何计算的",
     "methodologyFlow": "活跃度由当前屏幕上这些行的三项分位数加权得出：成交额（40%）、换手率（30%）与涨跌幅绝对值（30%）。它相对于当前视图而非整个市场 —— 把 20 行改成 100 行，评分就会变化。",
     "methodologyLiquidity": "流动性评分由报价价差占中间价的比例（50%）、持仓量（30%）与当日成交量（20%）加权得出，后两项取对数刻度。它衡量的是合约是否容易成交，而非是否值得持有。",
     "methodologyGreeks": "中间价、价差、价值状态与盈亏平衡点均由买卖报价直接计算。希腊字母以合约隐含波动率经 Black-Scholes 得出；数据源未提供隐波时，改由中间价反解并以星号标注。",
+    "methodologyProviders": "期权链数据来自 Yahoo Finance，当其不可用时自动切换到 Cboe 的延时行情。两者均免费且无需密钥，也都是延时数据 —— 上方时间戳表示抓取时刻，而非交易所成交时刻。",
     "methodologyMissing": "短横线表示数据源没有该数值。所有缺失一律不作估计或填充；单边报价不会被平均成无人成交的中间价。",
     "methodologyDisclaimer": "以上均为基于公开市场数据的排序辅助工具，并非预测、推荐或投资建议。",
     "sources": "数据来源：筛选数据来自 {{screener}}，期权数据来自 {{options}}。"

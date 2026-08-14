@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# One command to get the market-discovery dashboard running on live data.
+#
+# Installs what is missing, checks that the free data providers are actually
+# reachable, builds the frontend, and serves the app at /markets.
+#
+# No API keys, accounts or paid tiers are involved: the screener reads
+# Eastmoney's public quote endpoint and option chains come from Yahoo Finance
+# with Cboe's delayed-quote feed as a fallback. All three are free and keyless.
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PORT="${VIBE_MARKET_PORT:-8899}"
+HOST="${VIBE_MARKET_HOST:-127.0.0.1}"
+SKIP_BUILD=0
+SKIP_INSTALL=0
+CHECK_ONLY=0
+TICKER="AAPL"
+
+if [[ -n "${PYTHON:-}" ]]; then
+  PYTHON_BIN="$PYTHON"
+elif [[ -x "$ROOT/.venv/bin/python" ]]; then
+  PYTHON_BIN="$ROOT/.venv/bin/python"
+elif [[ -x "$ROOT/agent/.venv/bin/python" ]]; then
+  PYTHON_BIN="$ROOT/agent/.venv/bin/python"
+else
+  PYTHON_BIN="python3"
+fi
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/market-dashboard [options]
+
+Brings up the market-discovery dashboard on live market data.
+
+Options:
+  --check          Only probe the data providers, then exit
+  --skip-install   Assume Python and npm dependencies are already installed
+  --skip-build     Serve the existing frontend/dist without rebuilding
+  --ticker SYMBOL  Underlying used for the provider probe (default AAPL)
+  --port PORT      Port to serve on (default 8899)
+  --host HOST      Address to bind (default 127.0.0.1)
+  -h, --help       Show this message
+
+Environment:
+  PYTHON                       Python interpreter to use
+  VIBE_MARKET_PORT / _HOST     Same as --port / --host
+  VIBE_TRADING_EASTMONEY_MIN_INTERVAL   Seconds between Eastmoney requests
+  VIBE_TRADING_YAHOO_MIN_INTERVAL       Seconds between Yahoo requests
+  VIBE_TRADING_CBOE_MIN_INTERVAL        Seconds between Cboe requests
+
+Data sources are free and need no key. Quotes are delayed, typically by
+about 15 minutes.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --check) CHECK_ONLY=1; shift ;;
+    --skip-install) SKIP_INSTALL=1; shift ;;
+    --skip-build) SKIP_BUILD=1; shift ;;
+    --ticker) TICKER="$2"; shift 2 ;;
+    --port) PORT="$2"; shift 2 ;;
+    --host) HOST="$2"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+step() { printf '\n\033[1m==> %s\033[0m\n' "$1"; }
+
+if [[ $SKIP_INSTALL -eq 0 ]]; then
+  step "Installing the Python package (editable)"
+  "$PYTHON_BIN" -m pip install -e "$ROOT" --quiet
+fi
+
+step "Probing data providers"
+# A non-zero exit means degraded or unreachable. Keep going either way: the
+# dashboard is still worth starting when one source is down, and the report
+# above already says which half will work.
+if ! "$PYTHON_BIN" "$ROOT/agent/scripts/market_preflight.py" --ticker "$TICKER"; then
+  echo "Continuing anyway — see the report above for what will and will not load."
+fi
+
+if [[ $CHECK_ONLY -eq 1 ]]; then
+  exit 0
+fi
+
+if [[ $SKIP_BUILD -eq 0 ]]; then
+  if ! command -v npm >/dev/null 2>&1; then
+    echo "npm not found — install Node 22+ or pass --skip-build to serve an existing build." >&2
+    exit 2
+  fi
+  if [[ $SKIP_INSTALL -eq 0 ]]; then
+    step "Installing frontend dependencies"
+    (cd "$ROOT/frontend" && npm install --silent)
+  fi
+  step "Building the frontend"
+  (cd "$ROOT/frontend" && npm run build)
+elif [[ ! -d "$ROOT/frontend/dist" ]]; then
+  echo "No frontend/dist to serve. Drop --skip-build and let it build once." >&2
+  exit 2
+fi
+
+step "Serving on http://$HOST:$PORT/markets"
+echo "Press Ctrl-C to stop."
+cd "$ROOT/agent"
+exec "$PYTHON_BIN" api_server.py --host "$HOST" --port "$PORT"

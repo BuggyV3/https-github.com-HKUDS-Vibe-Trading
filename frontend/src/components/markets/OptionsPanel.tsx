@@ -113,9 +113,31 @@ export function OptionsPanel({ chain, loading, error, ticker, onExpirationChange
   if (!chain) return null;
 
   const { summary } = chain;
+  // More than one provider tried means the primary was down and a fallback
+  // served this chain — worth stating, since the two feeds are not identical.
+  const usedFallback = (chain.attempted?.length ?? 1) > 1;
 
   return (
     <div className="flex flex-col gap-4">
+      {/* Which feed answered */}
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        <span
+          className={cn(
+            "rounded-full border px-2 py-0.5",
+            usedFallback
+              ? "border-warning/40 bg-warning/10 text-warning"
+              : "border-border text-muted-foreground",
+          )}
+        >
+          {t("markets.dataVia", { source: chain.source })}
+        </span>
+        {usedFallback && (
+          <span className="text-muted-foreground">
+            {t("markets.fallbackNote", { failed: chain.attempted?.[0] ?? "" })}
+          </span>
+        )}
+      </div>
+
       {/* Chain-level statistics */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
         <Stat label={t("markets.statSpot")} value={fmtPrice(chain.spot)} mono />

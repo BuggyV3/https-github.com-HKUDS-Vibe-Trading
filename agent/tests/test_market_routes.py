@@ -198,7 +198,10 @@ def _yahoo_chain() -> dict[str, Any]:
     }
 
 
-def _patch_options(monkeypatch: pytest.MonkeyPatch, chain=None, error=None) -> list[dict]:
+def _patch_provider(
+    monkeypatch: pytest.MonkeyPatch, provider: str, chain=None, error=None
+) -> list[dict]:
+    """Stub one chain provider, recording every call it receives."""
     calls: list[dict] = []
 
     def fake_get_options(symbol: str, *, expiration=None):
@@ -208,9 +211,15 @@ def _patch_options(monkeypatch: pytest.MonkeyPatch, chain=None, error=None) -> l
         return _yahoo_chain() if chain is None else chain
 
     monkeypatch.setattr(
-        "backtest.loaders.yahoo_client.get_options", fake_get_options, raising=True
+        f"backtest.loaders.{provider}_client.get_options", fake_get_options, raising=True
     )
     return calls
+
+
+def _patch_options(monkeypatch: pytest.MonkeyPatch, chain=None, error=None) -> list[dict]:
+    """Stub Yahoo, and make Cboe unavailable so the primary path is isolated."""
+    _patch_provider(monkeypatch, "cboe", error=RuntimeError("cboe not stubbed"))
+    return _patch_provider(monkeypatch, "yahoo", chain=chain, error=error)
 
 
 def test_options_returns_an_enriched_chain(client: TestClient, monkeypatch):
@@ -275,21 +284,170 @@ def test_options_rejects_an_out_of_range_rate(client: TestClient, monkeypatch):
     assert response.status_code == 422
 
 
-def test_options_returns_404_when_the_symbol_has_no_chain(client: TestClient, monkeypatch):
-    _patch_options(monkeypatch, chain={})
-
-    response = client.get("/market/options", params={"ticker": "NOPE"})
-
-    assert response.status_code == 404
-
-
-def test_options_maps_a_provider_failure_to_502(client: TestClient, monkeypatch):
-    _patch_options(monkeypatch, error=RuntimeError("yahoo 401"))
+def test_options_maps_a_total_provider_failure_to_502(client: TestClient, monkeypatch):
+    _patch_provider(monkeypatch, "yahoo", error=RuntimeError("yahoo 401"))
+    _patch_provider(monkeypatch, "cboe", error=RuntimeError("cboe 503"))
 
     response = client.get("/market/options", params={"ticker": "AAPL"})
 
     assert response.status_code == 502
+    # The primary provider's failure is the one reported — it is the read the
+    # caller would otherwise have been served.
     assert "yahoo 401" in response.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# Chain provider fallback
+# ---------------------------------------------------------------------------
+
+
+def test_options_falls_back_to_cboe_when_yahoo_errors(client: TestClient, monkeypatch):
+    _patch_provider(monkeypatch, "yahoo", error=RuntimeError("yahoo 401"))
+    cboe_calls = _patch_provider(monkeypatch, "cboe")
+
+    response = client.get("/market/options", params={"ticker": "AAPL"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["source"] == "cboe"
+    assert body["attempted"] == ["yahoo", "cboe"]
+    assert len(cboe_calls) == 1
+    # The fallback chain is shaped by the same code path, greeks and all.
+    assert body["calls"][0]["greeks"]["delta"] > 0
+
+
+def test_options_falls_back_when_yahoo_lists_nothing(client: TestClient, monkeypatch):
+    # A symbol Yahoo has quietly stopped serving comes back empty rather than
+    # raising; falling through is as useful there as on an error.
+    _patch_provider(monkeypatch, "yahoo", chain={})
+    _patch_provider(monkeypatch, "cboe")
+
+    response = client.get("/market/options", params={"ticker": "AAPL"})
+
+    assert response.status_code == 200
+    assert response.json()["source"] == "cboe"
+
+
+def test_options_prefers_yahoo_when_it_answers(client: TestClient, monkeypatch):
+    _patch_provider(monkeypatch, "yahoo")
+    cboe_calls = _patch_provider(monkeypatch, "cboe")
+
+    body = client.get("/market/options", params={"ticker": "AAPL"}).json()
+
+    assert body["source"] == "yahoo"
+    assert body["attempted"] == ["yahoo"]
+    assert cboe_calls == []
+
+
+def test_options_can_pin_the_read_to_one_provider(client: TestClient, monkeypatch):
+    yahoo_calls = _patch_provider(monkeypatch, "yahoo")
+    _patch_provider(monkeypatch, "cboe")
+
+    body = client.get(
+        "/market/options", params={"ticker": "AAPL", "provider": "cboe"}
+    ).json()
+
+    assert body["source"] == "cboe"
+    assert yahoo_calls == []
+
+
+def test_options_pinned_to_a_broken_provider_does_not_fall_through(
+    client: TestClient, monkeypatch
+):
+    _patch_provider(monkeypatch, "yahoo")
+    _patch_provider(monkeypatch, "cboe", error=RuntimeError("cboe 503"))
+
+    response = client.get(
+        "/market/options", params={"ticker": "AAPL", "provider": "cboe"}
+    )
+
+    assert response.status_code == 502
+    assert "cboe 503" in response.json()["detail"]
+
+
+def test_options_rejects_an_unknown_provider(client: TestClient, monkeypatch):
+    yahoo_calls = _patch_options(monkeypatch)
+
+    response = client.get(
+        "/market/options", params={"ticker": "AAPL", "provider": "bloomberg"}
+    )
+
+    assert response.status_code == 400
+    assert yahoo_calls == []
+
+
+def test_fallback_translates_a_real_cboe_payload_end_to_end(
+    client: TestClient, monkeypatch
+):
+    """Yahoo down, Cboe serving: the raw CDN shape must survive the whole path.
+
+    Everything between the CDN JSON and the response runs for real here — the
+    OCC symbol parsing, the Yahoo-shape translation, then the same enrichment
+    that prices Yahoo's chains.
+    """
+    from backtest.loaders import cboe_client
+
+    cboe_client.clear_cache()
+    _patch_provider(monkeypatch, "yahoo", error=RuntimeError("yahoo 401"))
+
+    expiry = datetime.now(timezone.utc) + timedelta(days=28)
+    stamp = expiry.strftime("%y%m%d")
+    monkeypatch.setattr(
+        cboe_client,
+        "throttled_get_json",
+        lambda url, **kwargs: {
+            "data": {
+                "symbol": "AAPL",
+                "current_price": 150.0,
+                "options": [
+                    {
+                        "option": f"AAPL{stamp}C00150000",
+                        "bid": 4.0,
+                        "ask": 4.2,
+                        "volume": 900,
+                        "open_interest": 4000,
+                        "iv": 0.28,
+                        "last_trade_price": 4.1,
+                    },
+                    {
+                        "option": f"AAPL{stamp}P00150000",
+                        "bid": 3.5,
+                        "ask": 3.7,
+                        "volume": 400,
+                        "open_interest": 2500,
+                        "iv": 0.30,
+                        "last_trade_price": 3.6,
+                    },
+                ],
+            }
+        },
+    )
+
+    body = client.get("/market/options", params={"ticker": "AAPL"}).json()
+
+    assert body["source"] == "cboe"
+    assert body["spot"] == 150.0
+    call = body["calls"][0]
+    assert call["strike"] == 150.0
+    assert call["mid"] == pytest.approx(4.1)
+    assert call["break_even"] == pytest.approx(154.1)
+    assert call["implied_volatility"] == pytest.approx(0.28)
+    assert call["iv_source"] == "provider"
+    assert call["greeks"]["delta"] > 0
+    assert call["liquidity_score"] > 50
+    assert body["summary"]["put_call_oi_ratio"] == pytest.approx(0.625)
+    cboe_client.clear_cache()
+
+
+def test_options_reports_404_when_no_provider_lists_the_symbol(
+    client: TestClient, monkeypatch
+):
+    _patch_provider(monkeypatch, "yahoo", chain={})
+    _patch_provider(monkeypatch, "cboe", chain={})
+
+    response = client.get("/market/options", params={"ticker": "NOPE"})
+
+    assert response.status_code == 404
 
 
 def test_options_serves_repeat_requests_from_cache(client: TestClient, monkeypatch):
