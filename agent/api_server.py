@@ -283,6 +283,10 @@ from src.api.live_routes import (  # noqa: F401, E402
 from src.api.alpha_routes import register_alpha_routes  # noqa: E402
 register_alpha_routes(app)
 
+# --- Market discovery (read-only screener + option chain for the dashboard) ---
+from src.api.market_routes import register_market_routes  # noqa: E402
+register_market_routes(app)
+
 # --- Auth helpers (SSE tickets) ---
 from src.api.auth_routes import register_auth_routes  # noqa: E402
 register_auth_routes(app)

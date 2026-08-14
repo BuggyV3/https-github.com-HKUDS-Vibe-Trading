@@ -105,6 +105,107 @@ export interface UploadResult {
   filename: string;
 }
 
+// --- Market discovery (GET /market/screener, GET /market/options) -----------
+// Every numeric field is nullable on purpose: the backend reports `null` where
+// the provider had no value rather than a zero that would render as a real
+// quote. Treat `null` as "no data", never as 0.
+
+export type ScreenerMarket = "us" | "a" | "hk";
+export type ScreenerSort = "amount" | "change_pct" | "volume" | "turnover";
+
+export interface ScreenerRow {
+  code: string;
+  name: string;
+  price: number | null;
+  change_pct: number | null;
+  change: number | null;
+  volume: number | null;
+  /** Turnover value in the market's own currency. */
+  amount: number | null;
+  turnover_rate: number | null;
+  /** Percentile of turnover value within the returned rows (0-100). */
+  liquidity_pct: number | null;
+  /** Percentile of turnover rate within the returned rows (0-100). */
+  activity_pct: number | null;
+  /** Percentile of absolute move within the returned rows (0-100). */
+  momentum_pct: number | null;
+  /** Weighted blend of the three percentiles above (0-100). */
+  flow_score: number | null;
+}
+
+export interface ScreenerResponse {
+  market: ScreenerMarket;
+  sort_by: ScreenerSort;
+  top_n: number;
+  source: string;
+  /** Server UTC at the time of the underlying provider fetch. */
+  as_of: string;
+  rows: ScreenerRow[];
+  weights: Record<string, number>;
+}
+
+export interface OptionGreeks {
+  delta: number;
+  gamma: number;
+  theta: number;
+  vega: number;
+  rho: number;
+}
+
+export interface OptionContract {
+  contract_symbol: string | null;
+  side: "call" | "put";
+  strike: number | null;
+  last_price: number | null;
+  bid: number | null;
+  ask: number | null;
+  mid: number | null;
+  spread: number | null;
+  spread_pct: number | null;
+  volume: number | null;
+  open_interest: number | null;
+  volume_oi_ratio: number | null;
+  implied_volatility: number | null;
+  /** "provider" when quoted upstream, "implied" when inverted from mid. */
+  iv_source: "provider" | "implied" | null;
+  in_the_money: boolean | null;
+  moneyness: number | null;
+  break_even: number | null;
+  notional: number | null;
+  days_to_expiry: number | null;
+  greeks: OptionGreeks | null;
+  /** Tradeability blend of spread, open interest and volume (0-100). */
+  liquidity_score: number | null;
+  expiration: number | null;
+}
+
+export interface OptionChainSummary {
+  call_open_interest: number | null;
+  put_open_interest: number | null;
+  call_volume: number | null;
+  put_volume: number | null;
+  put_call_oi_ratio: number | null;
+  put_call_volume_ratio: number | null;
+  atm_iv: number | null;
+  median_spread_pct: number | null;
+  contracts: number;
+}
+
+export interface OptionChainResponse {
+  ticker: string;
+  spot: number | null;
+  currency: string | null;
+  expiration: number | null;
+  expirations: number[];
+  days_to_expiry: number | null;
+  risk_free_rate: number;
+  as_of: string;
+  source: string;
+  calls: OptionContract[];
+  puts: OptionContract[];
+  summary: OptionChainSummary;
+}
+
 async function uploadFile(file: File): Promise<UploadResult> {
   const form = new FormData();
   form.append("file", file);
@@ -126,6 +227,32 @@ export const api = {
     request<CorrelationResponse>(
       `/correlation?codes=${encodeURIComponent(codes)}&days=${encodeURIComponent(String(days))}&method=${encodeURIComponent(method)}`,
     ),
+  // Market discovery. Both reads are cached server-side for a few seconds, so
+  // a short dashboard refresh interval collapses onto one provider request.
+  getMarketScreener: (
+    market: ScreenerMarket,
+    sortBy: ScreenerSort,
+    topN: number,
+    signal?: AbortSignal,
+  ) => {
+    const q = new URLSearchParams({
+      market,
+      sort_by: sortBy,
+      top_n: String(topN),
+    });
+    return request<ScreenerResponse>(`/market/screener?${q.toString()}`, { signal });
+  },
+  getOptionChain: (
+    ticker: string,
+    expiration?: number | null,
+    riskFreeRate?: number,
+    signal?: AbortSignal,
+  ) => {
+    const q = new URLSearchParams({ ticker });
+    if (expiration != null) q.set("expiration", String(expiration));
+    if (riskFreeRate != null) q.set("risk_free_rate", String(riskFreeRate));
+    return request<OptionChainResponse>(`/market/options?${q.toString()}`, { signal });
+  },
   getCorrelationRegime: (codes: string, days: number) =>
     request<CorrelationRegimeResponse>(
       `/correlation/regime?codes=${encodeURIComponent(codes)}&days=${encodeURIComponent(String(days))}`,

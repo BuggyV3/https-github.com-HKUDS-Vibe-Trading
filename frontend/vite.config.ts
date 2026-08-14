@@ -48,6 +48,10 @@ export default defineConfig(({ mode }) => {
         "/runs": apiProxy,
         "/correlation": apiProxyWithHtmlFallback,
         "^/alpha(?:/|$)": apiProxy,
+        // Market-discovery reads. Anchored on the trailing slash so it proxies
+        // ``/market/screener`` and ``/market/options`` without swallowing the
+        // ``/markets`` SPA page, which Vite must keep serving from index.html.
+        "^/market/": apiProxy,
       },
     },
     build: {

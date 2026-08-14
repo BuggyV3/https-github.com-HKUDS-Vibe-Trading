@@ -65,10 +65,19 @@ def test_no_circular_imports():
 
 
 def test_api_server_is_thin_assembler():
+    """api_server.py stays an assembler: imports, middleware, route mounts.
+
+    The budget is re-baselined when a new route module is mounted — each mount
+    costs three lines here (section comment, import, register call) and the cap
+    was sitting exactly on the previous total, leaving no room for one. It was
+    raised to 410 when ``src/api/market_routes.py`` was mounted. Raise it only
+    for another mount of that kind; route *logic* still belongs in a module
+    under ``src/api/``, which is what this guard exists to enforce.
+    """
     import inspect
     source = inspect.getsource(api_server)
     total_lines = len(source.splitlines())
-    assert total_lines < 400, f"api_server.py has {total_lines} lines, expected < 400"
+    assert total_lines < 410, f"api_server.py has {total_lines} lines, expected < 410"
 
 
 # ============================================================================
